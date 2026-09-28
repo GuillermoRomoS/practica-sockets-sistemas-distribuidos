@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package calculadora;
+
+// Servicio de calculadora remota expuesto mediante gRPC.
+//
+// Esta es una caracteristica anadida sobre la practica base de sockets:
+// resuelve el mismo problema de fondo (invocacion remota entre un
+// cliente y un servidor) pero con un mecanismo de RPC moderno en lugar
+// de sockets TCP en crudo, para poder comparar ambos enfoques tal como
+// se explican en el Tema 2 (Comunicacion) de la asignatura.
+//
+// El servicio expone dos modos de llamada gRPC distintos (de los cuatro
+// que recogen los apuntes: unario, streaming de servidor, streaming de
+// cliente y bidireccional):
+//
+//   - Unario: Sumar, Restar, Multiplicar, Dividir. Una peticion, una
+//     respuesta. Es el caso normal, equivalente a una llamada a funcion.
+//   - Streaming de servidor: ObtenerHistorico. Una peticion, y el
+//     servidor responde con una secuencia de mensajes (uno por cada
+//     operacion registrada) en lugar de una unica respuesta con una
+//     lista dentro.
+service Calculadora {
+  rpc Sumar (OperacionRequest) returns (OperacionResponse);
+  rpc Restar (OperacionRequest) returns (OperacionResponse);
+  rpc Multiplicar (OperacionRequest) returns (OperacionResponse);
+  rpc Dividir (OperacionRequest) returns (OperacionResponse);
+
+  rpc ObtenerHistorico (HistoricoRequest) returns (stream RegistroHistorico);
+}
+
+// Peticion comun a las cuatro operaciones unarias: dos operandos.
+message OperacionRequest {
+  double a = 1;
+  double b = 2;
+}
+
+// Respuesta comun a las cuatro operaciones unarias: el resultado.
+// Los errores de aplicacion (por ejemplo division entre cero) no se
+// modelan con un campo de error aqui: se comunican con un codigo de
+// estado gRPC (ver servidor.py), que es el mecanismo propio de gRPC
+// para separar un resultado valido de un fallo de la llamada.
+message OperacionResponse {
+  double resultado = 1;
+}
+
+// Peticion para pedir el historial. Va vacia porque no hace falta
+// ningun parametro para pedir el historial completo.
+message HistoricoRequest {
+}
+
+// Un registro del historial de operaciones: una operacion realizada,
+// sus operandos, el resultado y el instante en que se ejecuto.
+message RegistroHistorico {
+  string operacion = 1;      // "suma", "resta", "multiplicacion", "division"
+  double a = 2;
+  double b = 3;
+  double resultado = 4;
+  string marca_temporal = 5; // fecha y hora en formato ISO 8601 (UTC)
+}

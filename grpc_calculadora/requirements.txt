@@ -1,0 +1,2 @@
+# Dependencia de runtime del servidor y el cliente gRPC.
+grpcio==1.66.2
