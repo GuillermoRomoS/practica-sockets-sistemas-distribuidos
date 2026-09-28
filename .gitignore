@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Variables de entorno / credenciales locales
+.env
+
+# Archivos auxiliares de compilacion LaTeX
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# Editor / sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,4 @@
+# El servidor y el cliente solo usan la biblioteca estandar de Python
+# (socket, threading, smtplib, ssl, email). No hay dependencias externas.
+# Este archivo existe para que Railway (Nixpacks) detecte el proyecto
+# como aplicacion Python sin ambiguedad.

@@ -1,0 +1,14 @@
+# Configuracion para Fly.io (alternativa a Railway si prefieres esa
+# plataforma o si Railway no te deja abrir el puerto SMTP).
+# Sustituye "servidor-sockets-tu-nombre" por un nombre de app unico.
+app = "servidor-sockets-tu-nombre"
+primary_region = "mad"
+
+[build]
+
+[[services]]
+  internal_port = 5050
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 5050

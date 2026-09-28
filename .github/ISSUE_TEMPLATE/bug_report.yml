@@ -1,0 +1,46 @@
+name: "Informe de fallo"
+description: Reportar un comportamiento incorrecto del servidor o del cliente
+title: "[BUG] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: descripcion
+    attributes:
+      label: Descripcion del problema
+      description: Que ha pasado y que esperabas que pasara
+    validations:
+      required: true
+  - type: textarea
+    id: pasos
+    attributes:
+      label: Pasos para reproducirlo
+      description: Comandos ejecutados, en orden
+      placeholder: |
+        1. python server.py
+        2. python client/client.py
+        3. Enviar el comando ...
+    validations:
+      required: true
+  - type: textarea
+    id: esperado
+    attributes:
+      label: Comportamiento esperado
+    validations:
+      required: false
+  - type: textarea
+    id: observado
+    attributes:
+      label: Comportamiento observado (salida real, traceback, mensaje de error)
+      render: shell
+    validations:
+      required: true
+  - type: dropdown
+    id: entorno
+    attributes:
+      label: Entorno
+      options:
+        - Local
+        - Desplegado en Railway
+        - Otro
+    validations:
+      required: true

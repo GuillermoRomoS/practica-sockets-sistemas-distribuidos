@@ -1,0 +1,528 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{booktabs}
+\usepackage{geometry}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{longtable}
+
+\geometry{margin=2.5cm}
+
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codekeyword}{RGB}{0,0,150}
+\definecolor{codecomment}{RGB}{100,100,100}
+\definecolor{codestring}{RGB}{150,0,0}
+
+\lstdefinestyle{python}{
+    language=Python,
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{codekeyword}\bfseries,
+    commentstyle=\color{codecomment}\itshape,
+    stringstyle=\color{codestring},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    stepnumber=1,
+    numbersep=8pt,
+    breaklines=true,
+    breakatwhitespace=false,
+    showstringspaces=false,
+    frame=single,
+    tabsize=4,
+    columns=fullflexible,
+}
+
+\lstdefinestyle{consola}{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,
+    breakatwhitespace=false,
+    showstringspaces=false,
+    frame=single,
+    columns=fullflexible,
+}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    urlcolor=blue,
+    citecolor=black,
+}
+
+\title{
+    \Large\textbf{Servidor de sockets multicliente con envío de correo electrónico mediante un sistema de mensajería externo}\\[0.3cm]
+    \large Práctica de Sistemas Distribuidos (Tema 2: Comunicación)
+}
+\author{Guillermo Romo Sánchez \\ Grado en Robótica e Inteligencia Artificial \\ Escuela Politécnica, Universidad Camilo José Cela}
+\date{28 de septiembre de 2026}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Introducción}
+% ============================================================
+
+Esta memoria documenta el diseño, la implementación y el despliegue de un servidor TCP multicliente desarrollado para la asignatura de Sistemas Distribuidos, dentro del bloque dedicado a la comunicación entre procesos (Tema 2). El servidor parte del ejemplo básico visto en clase, construido sobre la interfaz de sockets de Berkeley (\texttt{socket}, \texttt{bind}, \texttt{listen}, \texttt{accept}, \texttt{send}/\texttt{recv}), y lo amplía en tres aspectos que la propia diapositiva del ejemplo básico señala como limitaciones: la atención a un único cliente, el tratamiento de los datos como bytes sueltos en lugar de mensajes completos, y la ausencia de cualquier interacción con un sistema externo.
+
+Sobre esa base se ha implementado un pequeño protocolo de aplicación orientado a texto, con varios comandos, entre ellos uno que envía un correo electrónico real delegando en un sistema de mensajería externo. Esto último sirve para ilustrar un patrón habitual en sistemas distribuidos: un servicio construido sobre un protocolo (aquí, sockets TCP con un protocolo propio) que, para completar una petición del cliente, se apoya en otro sistema de mensajería (un MOM, en la terminología del tema) en lugar de implementar esa funcionalidad por completo desde cero.
+
+Además del código, esta memoria recoge el proceso real de despliegue del servidor en una plataforma de hosting en la nube (Railway), que resultó bastante más instructivo de lo previsto: la plataforma introdujo varias restricciones de red no documentadas explícitamente que obligaron a diagnosticar y corregir el sistema en varias iteraciones. Esa secuencia completa, con los resultados reales observados en cada paso, se documenta en las secciones de resultados, problemas encontrados y soluciones adoptadas, distinguiendo siempre entre lo que se esperaba teóricamente y lo que se obtuvo en la ejecución real.
+
+
+% ============================================================
+\section{Objetivos}
+% ============================================================
+
+\begin{itemize}
+    \item Implementar un servidor TCP capaz de atender a varios clientes simultáneamente, sin bloquearse en la atención de uno solo.
+    \item Diseñar un protocolo de aplicación sencillo sobre TCP, resolviendo el problema de la delimitación de mensajes en un protocolo de transporte que solo entrega un flujo de bytes.
+    \item Integrar el servidor con un sistema de mensajería externo (correo electrónico) para completar una petición del cliente, como ejemplo de un servicio construido sobre sockets que se apoya en un MOM externo.
+    \item Desplegar el servidor en una plataforma de hosting en la nube, de forma que sea accesible públicamente desde cualquier cliente TCP.
+    \item Diagnosticar y documentar, con evidencia real de ejecución, los problemas de red y de plataforma surgidos durante el despliegue, distinguiendo sus causas a distintos niveles (enrutamiento, filtrado de puertos, protección a nivel de aplicación).
+\end{itemize}
+
+
+% ============================================================
+\section{Fundamentos teóricos}
+% ============================================================
+
+\subsection{Sockets TCP y modelo cliente-servidor}
+
+La comunicación se realiza mediante sockets TCP (\texttt{SOCK\_STREAM}), que proporcionan un servicio de transporte orientado a conexión, fiable y con entrega ordenada de los datos. El servidor sigue la secuencia clásica de un servidor TCP:
+
+\begin{enumerate}
+    \item \textbf{socket()}: crea el descriptor del socket.
+    \item \textbf{bind()}: lo asocia a una dirección local y un puerto.
+    \item \textbf{listen()}: lo pone en modo escucha, con una cola de conexiones pendientes.
+    \item \textbf{accept()}: bloquea hasta que llega una conexión entrante, y devuelve un nuevo socket dedicado a esa conexión.
+    \item \textbf{recv()} / \textbf{send()}: intercambio de datos sobre la conexión ya establecida.
+    \item \textbf{close()}: cierre de la conexión.
+\end{enumerate}
+
+El cliente, por su parte, solo necesita \textbf{connect()} para establecer la conexión contra la dirección y puerto del servidor, y a partir de ahí puede intercambiar datos con \textbf{send()}/\textbf{recv()}.
+
+\begin{verbatim}
+Cliente                              Servidor
+   |                                    |
+   |                              bind() + listen()
+   |                                    |
+   |------------ connect() ------------>|
+   |                                accept()
+   |<----------- BIENVENIDO ------------|
+   |                                    |
+   |------------- HOLA ---------------->|
+   |<--------- HOLA, cliente -----------|
+   |                                    |
+   |------------- SALIR --------------->|
+   |<------------ ADIOS ----------------|
+   |                                    |
+ close()                             close()
+\end{verbatim}
+
+\subsection{TCP como flujo de bytes: delimitación de mensajes}
+
+TCP no conoce el concepto de "mensaje": entrega un flujo continuo de bytes, sin marcar dónde empieza o termina cada unidad lógica de la aplicación. Esto tiene dos consecuencias prácticas que hay que resolver en la capa de aplicación:
+
+\begin{itemize}
+    \item Una llamada a \texttt{recv()} puede devolver menos bytes de los que el emisor envió en una sola llamada a \texttt{send()} (el mensaje llega "partido").
+    \item Una llamada a \texttt{recv()} puede devolver los bytes de varios mensajes enviados por separado, si llegaron juntos al búfer del receptor (el mensaje llega "pegado" a otro).
+    \item[]
+\end{itemize}
+
+La solución adoptada en esta práctica es un delimitador explícito: cada mensaje del protocolo termina en un salto de línea (\texttt{"\textbackslash n"}). El receptor acumula los bytes recibidos en un búfer y solo procesa un mensaje cuando encuentra ese delimitador, dejando en el búfer cualquier resto que pertenezca al siguiente mensaje. Esta es la técnica más simple de "framing" en protocolos de texto, y es la misma que usan por ejemplo SMTP o HTTP/1.1 en sus líneas de cabecera.
+
+\subsection{Concurrencia en el servidor}
+
+Un servidor que solo llama a \texttt{accept()} una vez queda bloqueado atendiendo a ese único cliente hasta que termine la conversación, y no puede aceptar nuevas conexiones mientras tanto. La solución aplicada es lanzar un hilo (\texttt{threading.Thread}) por cada conexión aceptada, de forma que el hilo principal vuelve inmediatamente a \texttt{accept()} para poder admitir el siguiente cliente, mientras cada hilo secundario atiende su propia conversación de forma independiente. Los hilos se marcan como \texttt{daemon=True} para que no impidan la finalización del proceso si el servidor se detiene.
+
+Es importante no confundir esta concurrencia (varios hilos del mismo proceso, en la misma máquina, compartiendo memoria) con el propio carácter distribuido del sistema (cliente y servidor son procesos independientes, potencialmente en máquinas distintas, que solo se comunican por mensajes a través de la red, sin memoria compartida). Son dos fenómenos distintos que coexisten en esta práctica: concurrencia a nivel de proceso servidor, y comunicación distribuida a nivel de la relación cliente-servidor.
+
+\subsection{Delegación en un sistema de mensajería externo (MOM)}
+
+El comando \texttt{CORREO} no implementa el envío de correo dentro del propio servidor de sockets: delega esa tarea en un sistema externo especializado en mensajería. Este patrón, en el que un servicio se apoya en un middleware orientado a mensajes (MOM) para completar parte de su trabajo, es habitual en sistemas distribuidos reales, donde raramente conviene reimplementar desde cero un protocolo de entrega de mensajes ya resuelto por otro sistema.
+
+En esta práctica se han usado, en momentos distintos, dos protocolos de transporte diferentes hacia ese sistema externo:
+
+\begin{itemize}
+    \item \textbf{SMTP} (Simple Mail Transfer Protocol, RFC 5321): protocolo textual sobre TCP, pensado específicamente para la transmisión de correo entre servidores. Puede cifrarse de dos formas: \textbf{STARTTLS} (RFC 3207), en la que la conexión empieza en texto claro por el puerto 587 y se eleva a TLS mediante un comando explícito antes de autenticar, o \textbf{TLS implícito}, en la que la conexión se cifra desde el primer byte, tradicionalmente por el puerto 465.
+    \item \textbf{Una API HTTP} (en este caso, la de Resend): el servidor hace una petición HTTPS normal (método POST, cuerpo en JSON) a un servicio externo, que es quien finalmente entrega el correo por SMTP en su propia infraestructura. El servidor de la práctica ya no habla SMTP en absoluto: solo HTTP sobre TLS.
+\end{itemize}
+
+Como se explica en la sección de problemas encontrados, el cambio del primer mecanismo al segundo no fue una decisión de diseño inicial, sino una solución adoptada tras comprobar empíricamente que el primero no era viable en el entorno de despliegue elegido.
+
+\subsection{Direcciones de escucha: \texttt{0.0.0.0} frente a \texttt{127.0.0.1}}
+
+El servidor se vincula a \texttt{0.0.0.0}, una dirección especial que no identifica una interfaz de red concreta sino que indica "escuchar en todas las interfaces disponibles de esta máquina". Es distinta de \texttt{127.0.0.1} (\textit{localhost}), que solo acepta conexiones originadas en la propia máquina. En un contenedor desplegado en la nube, el servidor debe escuchar en \texttt{0.0.0.0} para que el proxy de la plataforma (que técnicamente se conecta desde otra interfaz interna del propio contenedor) pueda alcanzarlo; si escuchara solo en \texttt{127.0.0.1}, sería inaccesible desde fuera del propio proceso.
+
+\subsection{Proxy TCP en plataformas PaaS}
+
+Railway, como otras plataformas de \textit{Platform as a Service}, no expone directamente el puerto interno del contenedor a Internet. En su lugar, ofrece un \textbf{proxy TCP}: un servicio de la propia plataforma que escucha en un host y puerto públicos, y reenvía el tráfico al puerto interno indicado del contenedor (en este caso, el \texttt{5050} en el que escucha \texttt{server.py}). Sin ese proxy configurado explícitamente, no existe ninguna ruta pública hacia el servicio, aunque el proceso esté en ejecución con normalidad dentro del contenedor.
+
+
+% ============================================================
+\section{Diseño}
+% ============================================================
+
+\subsection{Protocolo de aplicación}
+
+El protocolo diseñado es textual, orientado a líneas, y sigue un esquema petición-respuesta síncrono: el cliente envía una línea, el servidor responde con otra (o varias) antes de que el cliente envíe la siguiente. No hay mensajes asíncronos ni notificaciones espontáneas del servidor.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Comando} & \textbf{Comportamiento} \\
+\midrule
+\texttt{HOLA} & Responde \texttt{HOLA, cliente} \\
+\texttt{HORA} & Responde con la fecha y hora actuales del servidor \\
+\texttt{ECO <mensaje>} & Devuelve el mismo mensaje recibido \\
+\texttt{CORREO <destino>|<asunto>|<cuerpo>} & Envía un correo real a través del sistema de mensajería externo \\
+\texttt{SALIR} & Responde \texttt{ADIOS} y cierra la conexión \\
+(cualquier otro) & Responde \texttt{ERROR comando no reconocido} \\
+\bottomrule
+\end{tabular}
+\caption{Comandos del protocolo de aplicación}
+\end{table}
+
+El comando \texttt{CORREO} usa \texttt{|} como separador de sus tres argumentos (destinatario, asunto y cuerpo), ya que el espacio no sirve como separador porque el asunto y el cuerpo pueden contener espacios.
+
+\subsection{Configuración por variables de entorno}
+
+Todos los parámetros que varían entre el entorno local y el entorno de despliegue (dirección de escucha, puerto, credenciales del servicio de correo) se leen de variables de entorno, con valores por defecto razonables para ejecución local. Esto permite desplegar exactamente el mismo código, sin modificarlo, en distintas plataformas: solo cambia la configuración externa. Las credenciales en particular nunca se escriben en el código fuente ni se suben al repositorio: se gestionan como variables/secretos desde el panel de la plataforma de hosting.
+
+\subsection{Modo de prueba}
+
+Si las credenciales del sistema de mensajería no están definidas (por ejemplo, en un entorno de desarrollo local sin acceso a ellas), el servidor entra en \texttt{MODO\_PRUEBA}: el comando \texttt{CORREO} sigue respondiendo con el protocolo completo, pero simula el envío en lugar de contactar con el servicio externo. Esto permite probar la lógica del protocolo sin necesidad de credenciales reales ni de conexión a Internet.
+
+
+% ============================================================
+\section{Implementación}
+% ============================================================
+
+\subsection{Estructura del proyecto}
+
+\begin{verbatim}
+server.py               Servidor TCP multicliente (codigo principal)
+client.py                Cliente interactivo de linea de comandos
+prueba_multicliente.py   Prueba automatica con dos clientes en paralelo
+Dockerfile               Imagen del contenedor para el despliegue
+Procfile                 Comando de arranque (alternativa Nixpacks)
+requirements.txt          Sin dependencias externas (solo biblioteca estandar)
+runtime.txt               Version de Python (3.11)
+\end{verbatim}
+
+\subsection{Servidor (\texttt{server.py})}
+
+\lstinputlisting[style=python,caption={Servidor TCP multicliente con envío de correo mediante API HTTP externa},label={lst:server}]{server.py}
+
+Los puntos más relevantes de la implementación:
+
+\begin{itemize}
+    \item \textbf{Framing de mensajes} (líneas 149-160): el método \texttt{atender\_cliente} acumula los bytes recibidos en la variable \texttt{buffer} y extrae líneas completas con \texttt{buffer.split("\textbackslash n", 1)} en un bucle, de forma que un mensaje partido entre dos llamadas a \texttt{recv()} se reconstruye correctamente, y varios mensajes llegados en una sola llamada se procesan uno a uno.
+    \item \textbf{Concurrencia}: cada conexión aceptada se atiende en un hilo (\texttt{daemon=True}) independiente, de forma que el bucle principal de \texttt{iniciar()} puede volver inmediatamente a \texttt{accept()}.
+    \item \textbf{Envío de correo mediante API HTTP}: la función \texttt{enviar\_correo} construye una petición HTTPS con \texttt{urllib.request} hacia la API de Resend, con el cuerpo en JSON y autenticación mediante cabecera \texttt{Authorization: Bearer}. Se explica en la sección de problemas encontrados por qué se llegó a esta solución en lugar de usar SMTP directo, que fue el diseño inicial.
+    \item \textbf{Manejo de errores}: se distinguen los errores HTTP devueltos por la API externa (\texttt{urllib.error.HTTPError}) de los errores de red de bajo nivel (\texttt{urllib.error.URLError}), devolviendo en cada caso un mensaje distinto al cliente.
+\end{itemize}
+
+\subsection{Cliente (\texttt{client.py})}
+
+\lstinputlisting[style=python,caption={Cliente interactivo de línea de comandos},label={lst:client}]{client.py}
+
+El cliente admite host y puerto como argumentos de línea de comandos, con valores por defecto para ejecución local (\texttt{127.0.0.1:5050}), de forma que el mismo script sirve tanto para probar el servidor en local como para conectarse al servidor ya desplegado, indicando el host y puerto públicos del proxy TCP.
+
+\subsection{Prueba automática multicliente (\texttt{prueba\_multicliente.py})}
+
+\lstinputlisting[style=python,caption={Prueba automática de dos clientes concurrentes},label={lst:prueba}]{prueba_multicliente.py}
+
+Este script lanza dos clientes en hilos separados, cada uno con su propia secuencia de comandos, para comprobar que el servidor mantiene correctamente conversaciones independientes con clientes simultáneos sin mezclar sus respuestas. Está preparado para ejecutarse contra una instancia local del servidor (\texttt{127.0.0.1:5050}).
+
+% Insertar aqui la salida real de la ejecucion de prueba_multicliente.py,
+% una vez ejecutado localmente. No se incluye en esta version de la
+% memoria por no disponerse todavia de esa ejecucion documentada.
+
+
+% ============================================================
+\section{Desarrollo de la práctica: despliegue}
+% ============================================================
+
+\subsection{Elección de plataforma}
+
+Antes de desplegar, se compararon varias plataformas de hosting gratuitas atendiendo a dos requisitos imprescindibles para esta práctica: exponer un puerto TCP en bruto (no solo HTTP) y permitir tráfico saliente hacia servicios externos.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Plataforma} & \textbf{Tarjeta requerida} & \textbf{TCP en bruto} & \textbf{Observación} \\
+\midrule
+Railway (Full Trial vía GitHub) & No & Sí (TCP Proxy) & Elegida para esta práctica \\
+Fly.io & Sí (trial sin cargo) & Sí, nativo & Alternativa preparada, no usada finalmente \\
+Render.com (plan gratuito) & No & Solo HTTP(S) & Descartada (no sirve para sockets crudos) \\
+PythonAnywhere (plan gratuito) & No & No & Descartada (no permite servidor propio) \\
+\bottomrule
+\end{tabular}
+\caption{Comparativa de plataformas de despliegue consideradas}
+\end{table}
+
+Se optó por Railway por no requerir tarjeta de crédito y por soportar un proxy TCP nativo hacia el puerto interno del contenedor.
+
+\subsection{Método de despliegue}
+
+El despliegue se realizó con el CLI oficial de Railway (\texttt{railway up}), que empaqueta el directorio del proyecto y lo sube directamente a la plataforma, sin pasar por un repositorio Git intermedio. El registro real de la primera construcción exitosa de la imagen muestra que Railway detectó y utilizó el \texttt{Dockerfile} del proyecto para construir la imagen del contenedor:
+
+\begin{lstlisting}[style=consola]
+Deployment: https://railway.com/project/.../service/...
+scheduling build on Metal builder "builder-mpbfot"
+[internal] load build definition from Dockerfile
+[internal] load metadata for docker.io/library/python:3.11-slim
+[1/3] FROM docker.io/library/python:3.11-slim@sha256:e41613d4...
+[2/3] WORKDIR /app
+[3/3] COPY server.py .
+exporting to docker image format
+image push
+Deploy complete
+Servidor escuchando en 0.0.0.0:5050 (MODO_PRUEBA=inactivo)
+Starting Container
+\end{lstlisting}
+
+Este es un resultado real observado durante el despliegue, no una salida teórica: confirma que la imagen se construyó a partir de la versión de tres pasos del \texttt{Dockerfile} (imagen base \texttt{python:3.11-slim}, directorio de trabajo \texttt{/app}, copia de \texttt{server.py}) y que el proceso arrancó correctamente escuchando en el puerto interno \texttt{5050}.
+
+\subsection{Configuración del proxy TCP}
+
+En el panel de Railway, dentro de \textit{Settings > Networking > TCP Proxy}, se configuró un proxy que expone el servicio bajo el host público \texttt{mainline.proxy.rlwy.net}, puerto \texttt{59568}, redirigiendo hacia el puerto interno \texttt{5050} del contenedor. Este es el destino que usa el cliente para conectarse al servidor ya desplegado:
+
+\begin{lstlisting}[style=consola]
+python client.py mainline.proxy.rlwy.net 59568
+\end{lstlisting}
+
+
+% ============================================================
+\section{Resultados}
+% ============================================================
+
+Esta sección recoge los resultados reales obtenidos a lo largo de las distintas iteraciones del despliegue, en el orden cronológico en que se produjeron. Se distingue explícitamente lo que se esperaba teóricamente de lo que se obtuvo realmente en cada prueba, tal como exige el análisis de una práctica experimental.
+
+\begin{longtable}{@{}p{0.5cm}p{4cm}p{4.3cm}p{5.2cm}@{}}
+\toprule
+\textbf{\#} & \textbf{Comando / acción} & \textbf{Resultado esperado (teórico)} & \textbf{Resultado observado (real)} \\
+\midrule
+\endhead
+1 & Conectar el cliente antes de crear el TCP Proxy & Conexión aceptada o rechazada explícitamente & \texttt{TimeoutError} en \texttt{connect()}: no había ninguna ruta pública configurada \\
+2 & Conectar tras crear el TCP Proxy (\texttt{mainline.proxy.rlwy.net:59568}) & Conexión aceptada, mensaje de bienvenida & \texttt{conexion OK} seguido del mensaje \texttt{BIENVENIDO...} \\
+3 & \texttt{HOLA} & \texttt{HOLA, cliente} & \texttt{HOLA, cliente} \\
+4 & \texttt{HORA} & Fecha y hora actuales del servidor & \texttt{2026-09-28 09:45:55} \\
+5 & \texttt{ECO esto es una prueba} & \texttt{esto es una prueba} & \texttt{esto es una prueba} \\
+6 & \texttt{CORREO} vía SMTP puerto 587 (sin corrección de IPv4) & Conexión SMTP y envío del correo & \texttt{ERROR error de red: [Errno 101] Network is unreachable} \\
+7 & \texttt{CORREO} vía SMTP puerto 587 (con resolución forzada a IPv4) & Envío correcto, o fallo por filtrado del puerto & \texttt{ERROR error de red: timed out} \\
+8 & \texttt{CORREO} vía SMTP puerto 465 (TLS implícito) & Envío correcto si el puerto 465 no estuviera filtrado & \texttt{ERROR error de red: timed out} \\
+9 & \texttt{CORREO} vía API de Resend, antes de propagar la variable \texttt{RESEND\_API\_KEY} & Simulación en \texttt{MODO\_PRUEBA} & \texttt{OK simulado (MODO\_PRUEBA activo, sin RESEND\_API\_KEY)} \\
+10 & \texttt{CORREO} vía API de Resend, con clave activa, sin \texttt{User-Agent} propio & Correo enviado correctamente & \texttt{ERROR error HTTP 403 de Resend: error code: 1010} \\
+11 & \texttt{CORREO} vía API de Resend, con \texttt{User-Agent} propio & Correo enviado correctamente & \texttt{OK correo enviado (id Resend: 01a0e779-5425-731d-933e-2ca708b17348)} \\
+\bottomrule
+\caption{Resultados reales observados en las sucesivas pruebas del comando \texttt{CORREO}}
+\label{tab:resultados}
+\end{longtable}
+
+El último resultado (fila 11) constituye la confirmación de éxito a nivel de protocolo: la API de Resend respondió con un código HTTP 200 y un identificador de mensaje válido, lo que indica que aceptó la petición de envío. La verificación visual de la recepción del correo en la bandeja de entrada del destinatario queda pendiente de confirmación manual por parte del estudiante, y no se documenta aquí por no disponer de esa evidencia directa en el momento de redactar esta memoria.
+
+% Insertar aqui captura de la bandeja de entrada confirmando la recepcion
+% real del correo, una vez verificada.
+
+
+% ============================================================
+\section{Análisis}
+% ============================================================
+
+\subsection{Sobre la naturaleza de los errores de red observados}
+
+Un aspecto especialmente instructivo de esta práctica es que los distintos fallos de red obtenidos en las filas 1, 6, 7-8 y 10 de la tabla \ref{tab:resultados} no son intercambiables entre sí: cada tipo de error indica un problema distinto y a un nivel distinto de la comunicación, y confundirlos habría llevado a diagnósticos equivocados.
+
+\begin{itemize}
+    \item \textbf{\texttt{TimeoutError} en \texttt{connect()} (fila 1)}: no existía ninguna ruta pública hacia el servidor, porque el proxy TCP no estaba creado. El sistema operativo del cliente enviaba el intento de conexión, pero nunca llegaba respuesta porque no había ningún proceso escuchando en ese host:puerto público.
+    \item \textbf{\texttt{[Errno 101] Network is unreachable} (fila 6)}: este es un error de \textit{enrutamiento}, devuelto de forma inmediata por el sistema operativo, no tras esperar una respuesta. Indica que el contenedor no tenía ninguna ruta de red hacia la dirección de destino. La causa identificada fue que \texttt{smtp.gmail.com} publica tanto una dirección IPv4 como una IPv6, y el contenedor de Railway anunciaba soporte IPv6 en su pila de red sin tener una ruta IPv6 real hacia el exterior: al intentar conectar por IPv6, el fallo era inmediato.
+    \item \textbf{\texttt{timed out} (filas 7 y 8)}: a diferencia del error anterior, un timeout significa que el paquete sí se envió (ya no había problema de enrutamiento, tras forzar IPv4), pero nadie respondió en el plazo configurado. En un proveedor de hosting, esto es característico de un cortafuegos de salida que descarta silenciosamente el tráfico hacia determinados puertos, sin devolver ningún rechazo explícito.
+    \item \textbf{\texttt{HTTP 403 (error code: 1010)} (fila 10)}: este ya no es un fallo de red en absoluto, sino un rechazo a nivel de aplicación: la conexión TCP y la negociación TLS se completaron con éxito, y el servidor de Cloudflare que protege la API de Resend llegó a procesar la petición HTTP, pero la rechazó por considerar sospechosa la cabecera \texttt{User-Agent} por defecto de la biblioteca cliente utilizada.
+\end{itemize}
+
+Esta progresión (fallo de enrutamiento $\rightarrow$ fallo de conexión por filtrado $\rightarrow$ fallo de autorización a nivel de aplicación) ilustra cómo, en sistemas distribuidos reales, un mismo síntoma superficial ("no funciona") puede tener causas en capas completamente distintas, y que la estrategia correcta de diagnóstico consiste en aislar en qué capa se produce exactamente el fallo antes de intentar corregirlo.
+
+\subsection{Sobre el filtrado de puertos SMTP en plataformas de hosting}
+
+El bloqueo del tráfico saliente hacia los puertos 587 y 465 no está documentado explícitamente en la plataforma utilizada, pero es una práctica extendida entre proveedores de hosting gratuito o de bajo coste, con el objetivo de impedir que sus contenedores se utilicen para el envío masivo de correo no deseado (spam). Esto tiene una implicación práctica relevante para el diseño de sistemas distribuidos desplegados en la nube: no puede asumirse que un servicio tenga conectividad saliente irrestricta simplemente porque tenga conectividad entrante; cada dirección del tráfico (entrante/saliente) y cada puerto pueden estar sujetos a políticas de filtrado independientes, y conviene comprobarlo empíricamente en el entorno de despliegue real, en lugar de asumirlo a partir del comportamiento en el entorno de desarrollo local.
+
+\subsection{Sobre delegar en un servicio externo vía HTTP en lugar de SMTP directo}
+
+Sustituir la conexión SMTP directa por una petición a una API HTTP no altera el patrón de diseño de la práctica (seguir delegando en un sistema de mensajería externo), pero sí cambia el protocolo de transporte hacia ese sistema. Desde el punto de vista de la asignatura, es un buen ejemplo de cómo la elección de protocolo de un sistema distribuido está condicionada no solo por requisitos funcionales, sino también por restricciones del entorno de despliegue: HTTP(S) sobre el puerto 443 es, en la práctica, el protocolo con menos probabilidad de encontrarse filtrado en cualquier red, precisamente porque es el que sostiene la navegación web general, mientras que protocolos más especializados como SMTP en puertos no estándar son más susceptibles de estar restringidos.
+
+\subsection{Sobre la concurrencia del servidor}
+
+El diseño con un hilo por conexión permite que el servidor atienda a varios clientes simultáneamente sin que uno bloquee al resto, lo cual queda demostrado a nivel de diseño por la estructura de \texttt{prueba\_multicliente.py} (dos clientes conversando en paralelo, cada uno con su propia secuencia de comandos y sin interferir con el otro). Al no disponerse todavía de una ejecución documentada de ese script contra el servidor, esta conclusión se sostiene en el análisis del código (cada conexión aceptada se delega de inmediato a un hilo independiente, sin que el bucle de \texttt{accept()} quede bloqueado) y queda pendiente de confirmación experimental explícita.
+
+
+% ============================================================
+\section{Problemas encontrados}
+% ============================================================
+
+\begin{description}[leftmargin=0cm,style=nextline]
+    \item[Problema 1: proxy TCP no configurado] \hfill \\
+    Al intentar conectar el cliente contra el host y puerto públicos, la conexión fallaba con \texttt{TimeoutError}. No existía ningún TCP Proxy creado en el panel de Railway que expusiera el puerto interno \texttt{5050} del contenedor.
+
+    \item[Problema 2: proxy TCP mal configurado] \hfill \\
+    Tras crear un primer proxy, se detectaron dos proxies simultáneos: uno correcto (\texttt{mainline.proxy.rlwy.net:59568 $\rightarrow$ :5050}) y otro apuntando a un puerto interno (\texttt{:59568}) en el que no escuchaba ningún proceso, por lo que ese segundo proxy no conducía a ningún sitio.
+
+    \item[Problema 3: \texttt{Network is unreachable} al conectar con el servidor SMTP] \hfill \\
+    Al ejecutar el comando \texttt{CORREO}, la conexión SMTP fallaba de inmediato con \texttt{[Errno 101] Network is unreachable}, un error de enrutamiento a nivel de sistema operativo, no un simple fallo de aplicación.
+
+    \item[Problema 4: \texttt{timed out} tras corregir el enrutamiento IPv4] \hfill \\
+    Una vez resuelto el problema anterior, la conexión SMTP (tanto en el puerto 587 como en el 465) agotaba el tiempo de espera sin respuesta, indicando un filtrado del tráfico saliente por parte de la plataforma de hosting hacia esos puertos concretos.
+
+    \item[Problema 5: falta de repositorio Git para actualizar el despliegue] \hfill \\
+    El servicio en Railway se había desplegado originalmente con el CLI (\texttt{railway up}) y no a través de un repositorio de GitHub, por lo que no existía ningún repositorio Git local desde el que aplicar y subir las correcciones de código.
+
+    \item[Problema 6: rechazo HTTP 403 al llamar a la API de Resend] \hfill \\
+    Tras sustituir SMTP por la API HTTP de Resend, la primera petición real (ya con la clave de API configurada) fue rechazada con un código HTTP 403 y el mensaje \texttt{error code: 1010}, propio de la protección de Cloudflare situada delante de esa API.
+\end{description}
+
+
+% ============================================================
+\section{Soluciones adoptadas}
+% ============================================================
+
+\begin{description}[leftmargin=0cm,style=nextline]
+    \item[Solución 1] \hfill \\
+    Se creó un TCP Proxy en \textit{Settings > Networking} del servicio en Railway, apuntando explícitamente al puerto interno \texttt{5050}, que es el que usa \texttt{server.py} por defecto.
+
+    \item[Solución 2] \hfill \\
+    Se identificó cuál de los dos proxies era el correcto comparando su puerto interno de destino con el puerto real de escucha del servidor, y se recomendó eliminar el proxy sobrante para evitar compartir por error un destino no funcional.
+
+    \item[Solución 3] \hfill \\
+    Se interceptó la función \texttt{socket.getaddrinfo} para forzar que solo devolviera direcciones IPv4, evitando que la biblioteca de sockets intentara primero la dirección IPv6 de \texttt{smtp.gmail.com}, hacia la que el contenedor no tenía ruta real. Esta solución quedó posteriormente obsoleta al abandonar SMTP en favor de la API HTTP (solución 6), y se retiró del código.
+
+    \item[Solución 4] \hfill \\
+    Al confirmarse que el filtrado afectaba a ambos puertos SMTP habituales (587 y 465), se descartó la vía SMTP directa como no viable en esta plataforma, y se adoptó la solución 6 (API HTTP externa) como alternativa arquitectónica, en lugar de seguir intentando distintos puertos o parámetros SMTP.
+
+    \item[Solución 5] \hfill \\
+    Se confirmó, mediante la variable de entorno de Railway y \texttt{railway whoami}, que el servicio estaba vinculado al proyecto a través de sesión de CLI. Las actualizaciones de código posteriores se aplicaron directamente sobre los archivos locales del proyecto y se subieron con \texttt{railway up}, sin necesidad de un repositorio Git intermedio.
+
+    \item[Solución 6] \hfill \\
+    Se sustituyó el envío por SMTP directo por una petición HTTPS POST a la API de Resend (\texttt{https://api.resend.com/emails}), autenticada con una clave de API pasada como variable de entorno (\texttt{RESEND\_API\_KEY}). Al usar el puerto 443, esta vía no está sujeta al filtrado detectado en los puertos SMTP.
+
+    \item[Solución 7] \hfill \\
+    Se añadió una cabecera \texttt{User-Agent} propia y descriptiva a la petición HTTP hacia la API de Resend, evitando la firma por defecto de \texttt{urllib} (\texttt{Python-urllib/x.y}) que la protección de Cloudflare identificaba como tráfico automatizado sospechoso.
+\end{description}
+
+
+% ============================================================
+\section{Conclusiones}
+% ============================================================
+
+Esta práctica ha permitido trabajar de forma directa con los fundamentos de la comunicación mediante sockets TCP: el ciclo de vida de un socket servidor, la necesidad de delimitar mensajes sobre un transporte orientado a flujo de bytes, y la concurrencia mediante hilos para atender a varios clientes sin bloquear el servicio. Sobre esa base, el comando \texttt{CORREO} ha servido para ilustrar un patrón habitual en sistemas distribuidos: delegar en un sistema de mensajería externo (un MOM) para completar una funcionalidad, en lugar de implementarla íntegramente en el propio servicio.
+
+Más allá del diseño inicial, el proceso real de despliegue en una plataforma de hosting en la nube ha resultado especialmente formativo, precisamente por las dificultades encontradas. Se ha comprobado empíricamente que un entorno de despliegue introduce restricciones de red (filtrado de puertos salientes, problemas de enrutamiento IPv6, protecciones a nivel de aplicación como Cloudflare) que no existen en el entorno de desarrollo local y que no siempre están documentadas de antemano. Diagnosticar cada uno de estos problemas ha requerido distinguir con precisión el tipo de error obtenido en cada caso (fallo de enrutamiento, timeout por filtrado, rechazo HTTP a nivel de aplicación), en línea con la idea, señalada en el propio temario de la asignatura, de que en sistemas asíncronos y distribuidos no siempre es trivial distinguir entre causas distintas de un mismo síntoma aparente, y de que conviene basar el diagnóstico en la evidencia concreta que ofrece cada tipo de error, y no en suposiciones.
+
+Como línea de continuación, quedaría pendiente ejecutar y documentar formalmente la prueba automática multicliente (\texttt{prueba\_multicliente.py}) contra el servidor ya desplegado, así como confirmar de forma visual la recepción del correo electrónico enviado en la última prueba realizada.
+
+
+% ============================================================
+\section{Bibliografía}
+% ============================================================
+
+\begin{itemize}
+    \item Python Software Foundation. \textit{Documentación del módulo \texttt{socket}}. \url{https://docs.python.org/3/library/socket.html}
+    \item Python Software Foundation. \textit{Documentación del módulo \texttt{urllib.request}}. \url{https://docs.python.org/3/library/urllib.request.html}
+    \item Python Software Foundation. \textit{Documentación del módulo \texttt{threading}}. \url{https://docs.python.org/3/library/threading.html}
+    \item Postel, J. \textit{RFC 793: Transmission Control Protocol}. IETF, 1981. \url{https://www.rfc-editor.org/rfc/rfc793}
+    \item Klensin, J. \textit{RFC 5321: Simple Mail Transfer Protocol}. IETF, 2008. \url{https://www.rfc-editor.org/rfc/rfc5321}
+    \item Hoffman, P. \textit{RFC 3207: SMTP Service Extension for Secure SMTP over Transport Layer Security}. IETF, 2002. \url{https://www.rfc-editor.org/rfc/rfc3207}
+    \item Railway. \textit{Documentación de despliegue y redes (TCP Proxy)}. \url{https://docs.railway.com}
+    \item Resend. \textit{Documentación de la API de envío de correo}. \url{https://resend.com/docs}
+    \item Apuntes de la asignatura: \textit{T1 - Fundamentos de los sistemas distribuidos}, \textit{T2 - Comunicación}, \textit{T3 - Coordinación} (material proporcionado en la asignatura).
+\end{itemize}
+
+
+% ============================================================
+\section{Anexos}
+% ============================================================
+
+\subsection{Dockerfile}
+
+\begin{lstlisting}[style=consola,caption={Dockerfile usado para construir la imagen del contenedor},label={lst:dockerfile}]
+FROM python:3.11-slim
+WORKDIR /app
+COPY server.py .
+EXPOSE 5050
+CMD ["python", "server.py"]
+\end{lstlisting}
+
+\subsection{Procfile}
+
+\begin{lstlisting}[style=consola,caption={Procfile (comando de arranque alternativo, vía Nixpacks)}]
+web: python server.py
+\end{lstlisting}
+
+\subsection{requirements.txt}
+
+\begin{lstlisting}[style=consola,caption={requirements.txt: sin dependencias externas}]
+# El servidor y el cliente solo usan la biblioteca estandar de Python
+# (socket, threading, json, os, urllib). No hay dependencias externas.
+# Este archivo existe para que las plataformas de despliegue detecten
+# el proyecto como aplicacion Python sin ambiguedad.
+\end{lstlisting}
+
+\subsection{runtime.txt}
+
+\begin{lstlisting}[style=consola,caption={runtime.txt: version de Python}]
+python-3.11
+\end{lstlisting}
+
+\subsection{Registro real del despliegue exitoso (\texttt{railway up})}
+
+\begin{lstlisting}[style=consola,caption={Salida real del último despliegue, tras aplicar todas las correcciones}]
+railway up
+  Indexed
+  Compressed [====================] 100%
+  Uploaded
+Deployment: https://railway.com/project/83361212-2a9d-473f-ab43-349007114f18/service/2b0a7868-eb69-430e-bf02-bf07d696cf55?id=7776a4e3-d74c-495b-8a26-e6ac5405a291
+scheduling build on Metal builder "builder-mpbfot"
+fetched snapshot sha256:2567bb5ed54b5401e1faa4e2dae127c80d5b270d08931d8067972cb9c76b365e (7.7 kB bytes)
+fetching snapshot
+unpacking archive
+[internal] load build definition from Dockerfile
+[internal] load metadata for docker.io/library/python:3.11-slim
+[internal] load .dockerignore
+[3/3] COPY server.py .
+[internal] load build context
+[2/3] WORKDIR /app
+[1/3] FROM docker.io/library/python:3.11-slim@sha256:e41613d42d4891e4930f79523f93f81bbc7632584ec65e36ab055f41a800b41e
+exporting to docker image format
+image push
+Deploy complete
+Starting Container
+Servidor escuchando en 0.0.0.0:5050 (MODO_PRUEBA=inactivo)
+\end{lstlisting}
+
+\subsection{Sesión real del cliente confirmando el envío de correo}
+
+\begin{lstlisting}[style=consola,caption={Sesión real del cliente contra el servidor desplegado, con envío de correo confirmado}]
+py client.py mainline.proxy.rlwy.net 59568
+Conectando a mainline.proxy.rlwy.net:59568...
+BIENVENIDO. Comandos: HOLA | HORA | ECO <msg> | CORREO <destino>|<asunto>|<cuerpo> | SALIR
+> CORREO guillerromo@gmail.com|Prueba via Resend|Correo enviado a traves de la API HTTP de Resend
+OK correo enviado (id Resend: 01a0e779-5425-731d-933e-2ca708b17348)
+\end{lstlisting}
+
+\end{document}
